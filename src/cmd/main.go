@@ -9,21 +9,22 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"movieservice/client"
-	"movieservice/config"
-	"movieservice/grpcapi"
-	"movieservice/httpapi"
+	"movieservice/internal/adapter"
+	"movieservice/internal/config"
+	grpchandler "movieservice/internal/handler/grpc"
+	httphandler "movieservice/internal/handler/http"
+	"movieservice/internal/usecase"
 	"movieservice/proto"
-	"movieservice/service"
 )
 
 func main() {
 	cfg := config.Load()
-	svc := service.New(client.New(cfg.MovieBaseURL))
+	client := adapter.NewMovieClient(cfg.MovieBaseURL)
+	svc := usecase.NewMovieService(client)
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(svc).Handler(),
+		Handler:           httphandler.New(svc).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		// больше, чем таймаут service.LoadMovies (60 с), иначе ответ оборвётся
@@ -40,7 +41,7 @@ func main() {
 		log.Fatalf("grpc listen: %v", err)
 	}
 	gs := grpc.NewServer()
-	proto.RegisterMovieServiceServer(gs, grpcapi.New(svc))
+	proto.RegisterMovieServiceServer(gs, grpchandler.New(svc))
 	reflection.Register(gs)
 	log.Printf("gRPC on %s", cfg.GRPCAddr)
 	log.Fatal(gs.Serve(lis))

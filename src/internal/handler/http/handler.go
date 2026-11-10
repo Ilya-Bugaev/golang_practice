@@ -1,4 +1,4 @@
-package httpapi
+package http
 
 import (
 	"context"
@@ -6,18 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"movieservice/internal/domain"
+	"movieservice/internal/usecase"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
-
-	"movieservice/client"
-	"movieservice/service"
 )
 
-type Handler struct{ svc *service.Service }
+type Handler struct {
+	svc usecase.MovieUseCase
+}
 
-func New(svc *service.Service) *Handler { return &Handler{svc: svc} }
+func New(svc usecase.MovieUseCase) *Handler {
+	return &Handler{svc: svc}
+}
 
 // Handler возвращает корневой http.Handler: маршруты, обёрнутые в logging-middleware.
 func (h *Handler) Handler() http.Handler {
@@ -60,7 +63,6 @@ func logging(next http.Handler) http.Handler {
 	})
 }
 
-
 type errorBody struct {
 	Error errorInfo `json:"error"`
 }
@@ -101,13 +103,13 @@ func methodNotAllowed(allow ...string) http.HandlerFunc {
 // Внутренние детали клиенту не отдаём, только пишем в лог.
 func writeStandError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, client.ErrNotFound):
+	case errors.Is(err, domain.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "no movies found on the stand")
 	case errors.Is(err, context.DeadlineExceeded):
 		writeError(w, http.StatusGatewayTimeout, "stand_timeout", "the movie stand did not respond in time")
 	case errors.Is(err, context.Canceled):
 		writeError(w, http.StatusServiceUnavailable, "request_canceled", "the request was canceled")
-	case errors.Is(err, client.ErrBadResponse):
+	case errors.Is(err, domain.ErrBadResponse):
 		log.Printf("stand error: %v", err)
 		writeError(w, http.StatusBadGateway, "stand_error", "the movie stand returned an invalid response")
 	default:
@@ -143,7 +145,7 @@ func (h *Handler) loadMovies(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.svc.LoadMovies(r.Context(), from, to)
 	switch {
-	case errors.Is(err, service.ErrInvalidRange), errors.Is(err, service.ErrRangeTooLarge):
+	case errors.Is(err, domain.ErrInvalidRange), errors.Is(err, domain.ErrRangeTooLarge):
 		writeError(w, http.StatusBadRequest, "invalid_argument", err.Error())
 		return
 	case err != nil:
@@ -152,7 +154,26 @@ func (h *Handler) loadMovies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// JSON-массив в порядке id: фильм либо {"id":N,"error":"..."} для неудавшихся
-	writeJSON(w, http.StatusOK, res.Items)
+	items := make([]movieItem, 0, len(res.Entries))
+	for _, e := range res.Entries {
+		items = append(items, movieItem{Movie: e.Movie, Err: e.Err})
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// movieItem - элемент ответа /load-movies: сериализуется либо как фильм,
+// либо как ошибка загрузки {"id":N,"error":"..."} для неудавшегося id.
+// Транспортный DTO: формат HTTP-ответа - забота handler, а не usecase.
+type movieItem struct {
+	Movie *domain.Movie
+	Err   *domain.LoadError
+}
+
+func (i movieItem) MarshalJSON() ([]byte, error) {
+	if i.Err != nil {
+		return json.Marshal(i.Err)
+	}
+	return json.Marshal(i.Movie)
 }
 
 func (h *Handler) lastMovie(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +185,7 @@ func (h *Handler) lastMovie(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, m)
 }
 
+// Swagger HTML
 const swaggerHTML = `<!DOCTYPE html>
 <html><head><title>Movies API</title>
 <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist/swagger-ui.css">
@@ -173,6 +195,7 @@ const swaggerHTML = `<!DOCTYPE html>
 <script>SwaggerUIBundle({url:'/swagger/doc.json',dom_id:'#swagger-ui'})</script>
 </body></html>`
 
+// Swagger JSON
 const swaggerJSON = `{
   "swagger":"2.0","info":{"title":"Movies API","version":"1.0"},"basePath":"/",
   "produces":["application/json"],
